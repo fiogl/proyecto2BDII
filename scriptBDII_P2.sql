@@ -71,10 +71,10 @@ SELECT * FROM customer;
 		p_postal_code VARCHAR(5)	-> Codigo postal del cliente (opcional).
 
 	Retorna:
-  	Integer -> Corresponde al id del cliente creado
+  	Integer -> Corresponde al id del cliente creado o encontrado en la BD
 */
 CREATE OR REPLACE FUNCTION insertar_nuevo_cliente(
-    p_store_id INTEGER,			-- Cambié esto por integer para usar el id <-- Nota***
+    p_store_id INTEGER,	
     p_first_name VARCHAR(30),
     p_last_name VARCHAR(30),
     p_email VARCHAR(50),
@@ -90,22 +90,36 @@ LANGUAGE plpgsql
 SECURITY DEFINER
 AS $$
 DECLARE
-    v_address_id integer;
+	v_address_id integer;
     v_customer_id integer;
-	v_city_id integer; -- Esta variable no estaba definida   <-- Nota***
+	v_city_id integer;
 BEGIN
+	-- Primero verificamos si ya existe el cliente
+    SELECT customer_id
+    INTO v_customer_id
+    FROM customer c
+    JOIN address a ON c.address_id = a.address_id
+    JOIN city ci ON a.city_id = ci.city_id
+    WHERE c.store_id = p_store_id
+    	AND UPPER(c.first_name) = UPPER(p_first_name)
+    	AND UPPER(c.last_name) = UPPER(p_last_name)
+    	AND LOWER(c.email) = LOWER(p_email)
+    LIMIT 1;
+
+	-- Si ya existe, devolvemos su id y no insertamos nada
+    IF FOUND THEN
+    	RETURN v_customer_id;
+    END IF;
+
+	-- Si no estaba lo insertamos
 	-- Se asume que las ciudades posibles ya están en la BD
 	SELECT city_id INTO v_city_id FROM city
 	WHERE UPPER(city) = UPPER(p_city);
 
-	-- Se busca la dirección del nuevo cliente, si no está se inserta
-    SELECT address_id INTO v_address_id FROM address
-     WHERE UPPER(address) = UPPER(p_address) AND city_id = v_city_id; -- Qué pasa con el teléfono? TT
-    IF v_address_id IS NULL THEN
-        INSERT INTO address(address, address2, district, city_id, postal_code, phone, last_update)
-        VALUES (INITCAP(p_address),INITCAP(p_address2), INITCAP(p_district), v_city_id, p_postal_code, p_phone, now())
-        RETURNING address_id INTO v_address_id;
-    END IF;
+	-- Se inserta la dirección del nuevo cliente
+    INSERT INTO address(address, address2, district, city_id, postal_code, phone, last_update)
+    VALUES (INITCAP(p_address),INITCAP(p_address2), INITCAP(p_district), v_city_id, p_postal_code, p_phone, now())
+    RETURNING address_id INTO v_address_id;
 
 	-- Se inserta el nuevo cliente
     INSERT INTO customer(store_id, first_name, last_name, email, address_id, activebool, create_date, last_update, active)
@@ -155,19 +169,21 @@ BEGIN
     )
     INTO v_available;
 
+	-- Si la copia no estaba disponible lo notifica
     IF NOT v_available THEN
         RETURN 'La película no está disponible actualmente.';
     END IF;
 
-    -- Insertar el alquiler
+	-- Si estaba disponible inserta el alquiler
     INSERT INTO rental (rental_date, inventory_id, customer_id, staff_id, last_update)
     VALUES (NOW(), p_inventory_id, p_customer_id, p_staff_id, NOW())
     RETURNING rental_id INTO v_rental_id;
 
-    -- Insertar el pago asociado
+    -- E inserta el pago asociado
     INSERT INTO payment (customer_id, staff_id, rental_id, amount, payment_date)
     VALUES (p_customer_id, p_staff_id, v_rental_id, p_monto, NOW());
 
+	-- Finalmente devulve un mensaje con el id del nuevo alquiler
     RETURN format('Alquiler registrado correctamente. ID de alquiler: %s', v_rental_id);
 END;
 $$;
@@ -202,20 +218,23 @@ BEGIN
     FROM rental
     WHERE rental_id = p_rental_id;
 
+	-- Si no existe, lo notifica
     IF NOT FOUND THEN
         RETURN 'No existe un alquiler con ese ID.';
     END IF;
 
+	-- Si estaba, notifica que ya está devuelto
     IF v_rental.return_date IS NOT NULL THEN
         RETURN 'Este alquiler ya fue devuelto.';
     END IF;
 
-    -- Registrar la fecha de devolución
+    -- Si no estaba registra/actualiza la fecha de devolución
     UPDATE rental
     SET return_date = NOW(),
         last_update = NOW()
     WHERE rental_id = p_rental_id;
 
+	-- Finalmente devuelve un mensaje con el id del rental que se actualizó
     RETURN format('Devolución registrada correctamente para rental_id = %s', p_rental_id);
 END;
 $$;
@@ -286,7 +305,7 @@ GRANT EXECUTE ON FUNCTION buscar_pelicula(VARCHAR(30)) TO EMP;
 GRANT EXECUTE ON FUNCTION insertar_nuevo_cliente(INTEGER, VARCHAR(30), VARCHAR(30), VARCHAR(50), VARCHAR(50), VARCHAR(50), 
 										VARCHAR(50), VARCHAR(20), VARCHAR(50), VARCHAR(5)) TO ADMIN;
 
--- Esto no debería ser encesario pero lo dejo por si acaso 
+-- Esto no debería ser necesario pero lo dejo por si acaso 
 -- (pruebenlo sin usar esto, si les da error lo usan)		 <-- Nota***
 REVOKE ALL ON ALL TABLES IN SCHEMA public FROM emp;
 REVOKE ALL ON ALL TABLES IN SCHEMA public FROM admin;
@@ -311,19 +330,20 @@ SELECT registrar_alquiler(1, 1, 1, 5.00);
 SELECT registrar_devolucion(16056);
 
 SELECT insertar_nuevo_cliente(
-    1,                		-- store_id
-    'Ema',          		-- first_name
-    'Villacalencia',       	-- last_name
-    'ema@email.com',		-- email
-    '47 MySakila Drive',  	-- address (sí existe en la BD)
-    'Lethbridge',           -- city
-	'Alberta',				-- district
-	'00000000'				-- phone
+    1,                          -- p_store_id (id de la tienda existente)
+    'John',                     -- p_first_name
+    'Doe',                      -- p_last_name
+    'john.doe@example.com',     -- p_email
+    '123 Main Street',          -- p_address
+    'Batman',                 	-- p_city (debe existir en la tabla city)
+    'Manhattan',                -- p_district
+    '555-1234'                  -- p_phone
 );
--- Nuevo cliente 
 
+Select * from customer where first_name = 'John';
+-- Nuevo cliente 610
 
-/* 
+/* p
 	Para hacer pruebas de insert cliente
 	Parámetros:
 		p_store_id INTEGER			-> Id de la tienda.
@@ -339,6 +359,35 @@ SELECT insertar_nuevo_cliente(
 
 */
 
+Select * from city;
+
 select * from store;
 select * from address where city_id = 300;
 select * from city where city_id = 300;
+
+
+-- Cosas de la replicación ---------------------------------------------------------------
+SELECT * FROM pg_replication_slots;
+
+-- En el PRIMARIO (5432)
+SELECT * FROM pg_replication_slots;
+
+-- En el PRIMARIO (5432)
+SELECT * FROM pg_stat_replication;
+
+GRANT USAGE ON SCHEMA public TO replication_user;
+GRANT SELECT, INSERT, UPDATE ON ALL TABLES IN SCHEMA public TO replication_user;
+GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA public TO replication_user;
+
+SELECT slot_name, active FROM pg_replication_slots;
+
+SELECT pg_drop_replication_slot(slot_name) 
+FROM pg_replication_slots 
+WHERE slot_name LIKE '%sync%' AND active = false;
+
+SELECT * FROM pg_publication;
+-- "dvdrental_datamart"
+
+SELECT * FROM pg_publication_tables;
+
+ALTER PUBLICATION dvdrental_datamart ADD TABLE payment, staff, inventory;
